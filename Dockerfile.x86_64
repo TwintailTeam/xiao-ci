@@ -1,0 +1,26 @@
+FROM almalinux:9
+
+LABEL org.opencontainers.image.source="https://github.com/TwintailTeam/xiao-ci"
+
+RUN dnf -y install dnf-plugins-core epel-release \
+ && dnf config-manager --set-enabled crb \
+ && dnf -y install \
+      gcc gcc-c++ make git xz tar pkgconf-pkg-config clang lld llvm \
+      mesa-libGL-devel mesa-libEGL-devel libxkbcommon-devel \
+      alsa-lib brotli dbus-libs libdrm expat fontconfig freetype mesa-libgbm glib2 krb5-libs \
+      nspr nss nss-util systemd-libs libwayland-client libwayland-cursor libwayland-egl \
+      libX11 libX11-xcb libxcb xcb-util xcb-util-cursor xcb-util-image xcb-util-keysyms \
+      xcb-util-renderutil xcb-util-wm libXcomposite libXdamage libXext libXfixes \
+      libxkbcommon-x11 libxkbfile libXrandr libXtst zlib libzstd \
+ && dnf clean all
+
+ARG WINDOWS=1
+COPY fetch-qt.sh slim-qt.sh /tmp/
+RUN sh /tmp/fetch-qt.sh linux-x86_64 /opt/qt \
+ && if [ "$WINDOWS" = 1 ]; then sh /tmp/fetch-qt.sh windows-x86_64 /opt/qt; fi \
+ && sh /tmp/slim-qt.sh /opt/qt/6.12.0/* \
+ && chmod -R a+rX /opt/qt \
+ && rm /tmp/fetch-qt.sh /tmp/slim-qt.sh
+
+ENV QMAKE=/opt/qt/6.12.0/gcc_64/bin/qmake \
+    LANG=C.UTF-8

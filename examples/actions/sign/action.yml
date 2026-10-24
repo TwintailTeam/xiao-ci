@@ -1,0 +1,38 @@
+name: sign
+description: Upload an artifact, have SignPath sign it, and check the result on Windows
+inputs:
+  name: { required: true, description: artifact name and SignPath artifact configuration slug }
+  path: { required: true, description: files to sign }
+  output: { required: true, description: where the signed files go }
+  verify: { required: true, description: file in the output that must carry a valid signature }
+  api-token: { required: true, description: SignPath API token }
+  organization-id: { required: true, description: SignPath organization }
+  project-slug: { required: true, description: SignPath project }
+runs:
+  using: composite
+  steps:
+    - id: unsigned
+      uses: actions/upload-artifact@v7
+      with:
+        name: unsigned-${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+    - uses: signpath/github-action-submit-signing-request@v2
+      with:
+        api-token: ${{ inputs.api-token }}
+        organization-id: ${{ inputs.organization-id }}
+        project-slug: ${{ inputs.project-slug }}
+        signing-policy-slug: release-signing
+        artifact-configuration-slug: ${{ inputs.name }}
+        github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+        wait-for-completion: true
+        output-artifact-directory: ${{ inputs.output }}
+    - if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $files = Get-ChildItem -Path "${{ inputs.output }}" -Filter "${{ inputs.verify }}" -File
+        if (-not $files) { throw "SignPath returned no ${{ inputs.verify }}" }
+        foreach ($file in $files) {
+          $status = (Get-AuthenticodeSignature $file.FullName).Status
+          if ($status -ne 'Valid') { throw "$($file.Name) came back $status" }
+        }

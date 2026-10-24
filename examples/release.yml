@@ -1,0 +1,168 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the tag matches the app version
+        run: |
+          version=$(jq -r .version xiao.conf.json)
+          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --draft --generate-notes --verify-tag
+
+  linux:
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-latest }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container: ghcr.io/twintailteam/xiao-ci:${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: pnpm run bundle deb rpm appimage
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: src-xiao/target/release/bundle/*.{deb,rpm,AppImage}
+          if-no-files-found: error
+
+  windows:
+    needs: draft
+    runs-on: ubuntu-latest
+    container: ghcr.io/twintailteam/xiao-ci:x86_64
+    env:
+      XIAO_TARGET_QT: /opt/qt/6.12.0/msvc2022_64
+      XWIN_CACHE_DIR: /github/home/.cache/xwin
+      BUNDLE: src-xiao/target/x86_64-pc-windows-msvc/release/bundle/windows-portable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+      - uses: actions/cache@v5
+        with:
+          path: |
+            /github/home/.cache/xwin
+            /github/home/.cache/xiao
+          key: xwin-${{ runner.os }}
+      - run: echo "APP_NAME=$(node -p "require('./xiao.conf.json').productName")" >> "$GITHUB_ENV"
+      - run: pnpm run bundle windows-portable --target x86_64-pc-windows-msvc --runner cargo-xwin
+      - uses: ./.github/actions/sign
+        with:
+          name: portable
+          path: ${{ env.BUNDLE }}/${{ env.APP_NAME }}/
+          output: ${{ env.BUNDLE }}/signed
+          verify: ${{ env.APP_NAME }}.exe
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: signed-portable
+          path: ${{ env.BUNDLE }}/signed/
+          if-no-files-found: error
+
+  installer:
+    needs: windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: signed-portable
+          path: signed
+      - name: App info
+        run: |
+          $conf = Get-Content xiao.conf.json | ConvertFrom-Json
+          @(
+            "APP_NAME=$($conf.productName)"
+            "APP_ID=$($conf.identifier)"
+            "APP_VERSION=$($conf.version)"
+          ) >> $env:GITHUB_ENV
+          $sig = Get-AuthenticodeSignature "signed\$($conf.productName).exe"
+          if ($sig.Status -ne 'Valid') { throw "the app exe came back $($sig.Status)" }
+      - name: NSIS
+        run: |
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) { choco install nsis -y --no-progress }
+          "MAKENSIS=$makensis" >> $env:GITHUB_ENV
+      - name: Write uninstaller
+        run: |
+          $defines = "/DNAME=$env:APP_NAME", "/DIDENTIFIER=$env:APP_ID", "/DVERSION=$env:APP_VERSION"
+          New-Item -ItemType Directory -Force uninstaller | Out-Null
+          & $env:MAKENSIS @defines "/DWRITER=$env:RUNNER_TEMP\write-uninstaller.exe" "/DUNINSTALLER_OUT=$PWD\uninstaller\uninstall.exe" installer.nsi
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Start-Process -Wait "$env:RUNNER_TEMP\write-uninstaller.exe"
+      - uses: ./.github/actions/sign
+        with:
+          name: uninstaller
+          path: uninstaller/
+          output: signed-uninstaller
+          verify: uninstall.exe
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+      - name: Build installer
+        run: |
+          $defines = "/DNAME=$env:APP_NAME", "/DIDENTIFIER=$env:APP_ID", "/DVERSION=$env:APP_VERSION"
+          $out = "$PWD\installer\$($env:APP_NAME)_$($env:APP_VERSION)_x64-setup.exe"
+          & $env:MAKENSIS @defines "/DSOURCE=$PWD\signed" "/DUNINSTALLER=$PWD\signed-uninstaller\uninstall.exe" "/DOUTFILE=$out" installer.nsi
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: ./.github/actions/sign
+        with:
+          name: installer
+          path: installer/
+          output: signed-installer
+          verify: '*-setup.exe'
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-x64
+          path: signed-installer/*-setup.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, installer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" assets/* --clobber -R "$GITHUB_REPOSITORY"

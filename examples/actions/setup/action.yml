@@ -1,0 +1,22 @@
+name: setup
+description: pnpm, Node, Rust and caches, then the frontend dependencies
+inputs:
+  targets:
+    description: extra Rust targets
+    default: ''
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v6
+    - uses: actions/setup-node@v6
+      with:
+        node-version: lts/*
+        cache: pnpm
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ inputs.targets }}
+    - uses: swatinem/rust-cache@v2
+      with:
+        workspaces: src-xiao -> target
+    - shell: bash
+      run: pnpm install --frozen-lockfile

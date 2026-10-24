@@ -1,0 +1,28 @@
+FROM ubuntu:24.04
+
+LABEL org.opencontainers.image.source="https://github.com/TwintailTeam/xiao-ci"
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl git xz-utils pkg-config build-essential clang lld llvm \
+      libgl-dev libegl-dev libxkbcommon-dev \
+      libasound2t64 libbrotli1 libdbus-1-3 libdrm2 libegl1 libgl1 libexpat1 libfontconfig1 libfreetype6 \
+      libgbm1 libglib2.0-0t64 libice6 liblcms2-2 libminizip1t64 libnspr4 libnss3 libopus0 libsm6 \
+      libsnappy1v5 libudev1 libwayland-client0 libwayland-cursor0 libwayland-egl1 libwebp7 libwebpdemux2 \
+      libwebpmux3 libx11-6 libx11-xcb1 libxcb1 libxcb-cursor0 libxcb-dri3-0 libxcb-glx0 libxcb-icccm4 \
+      libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render0 libxcb-render-util0 libxcb-shape0 \
+      libxcb-shm0 libxcb-sync1 libxcb-util1 libxcb-xfixes0 libxcb-xkb1 libxcomposite1 libxdamage1 \
+      libxext6 libxfixes3 libxkbcommon0 libxkbcommon-x11-0 libxkbfile1 libxrandr2 libxtst6 zlib1g libzstd1 \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG WINDOWS=1
+COPY fetch-qt.sh slim-qt.sh /tmp/
+RUN sh /tmp/fetch-qt.sh linux-aarch64 /opt/qt \
+ && if [ "$WINDOWS" = 1 ]; then sh /tmp/fetch-qt.sh windows-aarch64 /opt/qt; fi \
+ && sh /tmp/slim-qt.sh /opt/qt/6.12.0/* \
+ && chmod -R a+rX /opt/qt \
+ && rm /tmp/fetch-qt.sh /tmp/slim-qt.sh
+
+ENV QMAKE=/opt/qt/6.12.0/gcc_arm64/bin/qmake \
+    LANG=C.UTF-8
