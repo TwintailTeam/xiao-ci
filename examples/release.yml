@@ -45,7 +45,10 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: release-linux-${{ matrix.arch }}
-          path: src-xiao/target/release/bundle/*.{deb,rpm,AppImage}
+          path: |
+            src-xiao/target/release/bundle/*.deb
+            src-xiao/target/release/bundle/*.rpm
+            src-xiao/target/release/bundle/*.AppImage
           if-no-files-found: error
 
   windows:
@@ -53,7 +56,6 @@ jobs:
     runs-on: ubuntu-latest
     container: ghcr.io/twintailteam/xiao-ci:x86_64
     env:
-      XIAO_TARGET_QT: /opt/qt/6.12.0/msvc2022_64
       XWIN_CACHE_DIR: /github/home/.cache/xwin
       BUNDLE: src-xiao/target/x86_64-pc-windows-msvc/release/bundle/windows-portable
     steps:
@@ -70,14 +72,17 @@ jobs:
             /github/home/.cache/xwin
             /github/home/.cache/xiao
           key: xwin-${{ runner.os }}
-      - run: echo "APP_NAME=$(node -p "require('./xiao.conf.json').productName")" >> "$GITHUB_ENV"
+      - run: |
+          echo "XIAO_TARGET_QT=/opt/qt/$("$QMAKE" -query QT_VERSION)/msvc2022_64" >> "$GITHUB_ENV"
+          echo "APP_NAME=$(node -p "require('./xiao.conf.json').productName")" >> "$GITHUB_ENV"
+          echo "APP_EXE=$(node -p "const c = require('./xiao.conf.json'); c.mainBinaryName || c.productName")" >> "$GITHUB_ENV"
       - run: pnpm run bundle windows-portable --target x86_64-pc-windows-msvc --runner cargo-xwin
       - uses: ./.github/actions/sign
         with:
           name: portable
           path: ${{ env.BUNDLE }}/${{ env.APP_NAME }}/
           output: ${{ env.BUNDLE }}/signed
-          verify: ${{ env.APP_NAME }}.exe
+          verify: ${{ env.APP_EXE }}.exe
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
           project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
@@ -102,12 +107,14 @@ jobs:
       - name: App info
         run: |
           $conf = Get-Content xiao.conf.json | ConvertFrom-Json
+          $exe = if ($conf.mainBinaryName) { $conf.mainBinaryName } else { $conf.productName }
           @(
             "APP_NAME=$($conf.productName)"
+            "APP_EXE=$exe"
             "APP_ID=$($conf.identifier)"
             "APP_VERSION=$($conf.version)"
           ) >> $env:GITHUB_ENV
-          $sig = Get-AuthenticodeSignature "signed\$($conf.productName).exe"
+          $sig = Get-AuthenticodeSignature "signed\$exe.exe"
           if ($sig.Status -ne 'Valid') { throw "the app exe came back $($sig.Status)" }
       - name: NSIS
         run: |
@@ -116,7 +123,7 @@ jobs:
           "MAKENSIS=$makensis" >> $env:GITHUB_ENV
       - name: Write uninstaller
         run: |
-          $defines = "/DNAME=$env:APP_NAME", "/DIDENTIFIER=$env:APP_ID", "/DVERSION=$env:APP_VERSION"
+          $defines = "/DNAME=$env:APP_NAME", "/DEXE=$env:APP_EXE", "/DIDENTIFIER=$env:APP_ID", "/DVERSION=$env:APP_VERSION"
           New-Item -ItemType Directory -Force uninstaller | Out-Null
           & $env:MAKENSIS @defines "/DWRITER=$env:RUNNER_TEMP\write-uninstaller.exe" "/DUNINSTALLER_OUT=$PWD\uninstaller\uninstall.exe" installer.nsi
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -132,7 +139,8 @@ jobs:
           project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
       - name: Build installer
         run: |
-          $defines = "/DNAME=$env:APP_NAME", "/DIDENTIFIER=$env:APP_ID", "/DVERSION=$env:APP_VERSION"
+          $defines = "/DNAME=$env:APP_NAME", "/DEXE=$env:APP_EXE", "/DIDENTIFIER=$env:APP_ID", "/DVERSION=$env:APP_VERSION"
+          New-Item -ItemType Directory -Force installer | Out-Null
           $out = "$PWD\installer\$($env:APP_NAME)_$($env:APP_VERSION)_x64-setup.exe"
           & $env:MAKENSIS @defines "/DSOURCE=$PWD\signed" "/DUNINSTALLER=$PWD\signed-uninstaller\uninstall.exe" "/DOUTFILE=$out" installer.nsi
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
